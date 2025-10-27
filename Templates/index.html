@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Sort Spotify Playlist by Last.fm Playcount</title>
+
+  <!-- 🔗 Load external CSS -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <!-- 📌 Header Section -->
+  <div id="header">
+    <h1>🎧 Sort Your Spotify Playlist by Last.fm Playcount</h1>
+    <h2>Select a playlist to sort:</h2>
+  </div>
+
+  <!-- 📌 Main Content Columns -->
+  <div id="container">
+    <!-- 📋 Playlist Column -->
+    <div id="playlists-column" class="column">
+      <input type="text" id="playlist-search" placeholder="Search playlists..." />
+      <div id="playlist-buttons"></div>
+    </div>
+
+    <!-- 🎶 Tracks Column -->
+    <div id="tracks-column" class="column">
+      <h3>Playlist Tracks</h3>
+      <div id="tracks-list"></div>
+    </div>
+
+    <!-- ⚙️ Options Column -->
+    <div id="options-column" class="column">
+      <h3>Actions</h3>
+      <button class="option-btn active" data-action="sort_desc">Sort: Highest PlayCount to Low</button>
+      <button class="option-btn" data-action="sort_asc">Sort: Lowest PlayCount to High</button>
+      <button class="option-btn" data-action="dedupe">Dedupe (placeholder)</button>
+      <button class="option-btn" data-action="sort_loved">Sort: Loved (placeholder)</button>
+      <button class="option-btn" data-action="sort_recent">Sort: Recently Played (placeholder)</button>
+    </div>
+
+    <!-- ✅ Result Column -->
+    <div id="result-column" class="column">
+      <button id="apply-btn" disabled>Apply Result to Spotify</button>
+      <div id="result-list"></div>
+    </div>
+  </div>
+
+  <!-- 🔗 Load external JavaScript -->
+  <script>
+    const playlists = {{ playlists|tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
