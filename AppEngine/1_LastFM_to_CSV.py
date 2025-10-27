@@ -51,24 +51,32 @@ def parse_date_or_datetime(dt_str, is_start=True):
     return int(dt.timestamp())
 
 def get_time_range_from_user():
-    # Automatically use option 3 (Append Newest Duration)
+    # Automatically select option 3 (Append Newest Duration) without prompting
     if not os.path.exists(DB_PATH):
-        print("[!] Database not found. Will download all time data.")
+        print("\n[!] Database not found. Will download all time data.")
         return None, None
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT `Played Time` FROM scrobbles ORDER BY `Played Time` DESC LIMIT 1")
-    row = cursor.fetchone()
-    conn.close()
-    
-    if row:
-        start_ts = int(datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()) + 1
-        print(f"\n[📅] Fetching new scrobbles since: {datetime.fromtimestamp(start_ts).strftime('%d %B %Y %H:%M:%S')}")
-        return start_ts, int(datetime.now().timestamp())
-    
-    print("[!] No existing data found. Will download all time data.")
-    return None, None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT `Played Time` FROM scrobbles ORDER BY `Played Time` DESC LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[0]:
+            start_ts = int(datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()) + 1
+            current_ts = int(datetime.now().timestamp())
+            print(f"\n[🔄] Automatically fetching new scrobbles since last update")
+            print(f"[📅] From: {datetime.fromtimestamp(start_ts).strftime('%d %B %Y %H:%M:%S')}")
+            return start_ts, current_ts
+            
+        print("\n[!] No existing data found. Will download all time data.")
+        return None, None
+        
+    except Exception as e:
+        print(f"\n[!] Error reading database: {str(e)}")
+        print("[!] Will download all time data.")
+        return None, None
 
 def fetch_all_scrobbles(user, time_from=None, time_to=None):
     all_tracks = []
