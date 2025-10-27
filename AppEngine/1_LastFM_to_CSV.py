@@ -51,57 +51,81 @@ def parse_date_or_datetime(dt_str, is_start=True):
     return int(dt.timestamp())
 
 def get_time_range_from_user():
-    print("Choose time range option:")
-    print("1. All time\n2. Specific time range\n3. Append Newest Duration (based on SQLite)")
-    choice = input("Enter 1, 2 or 3: ").strip()
-
-    if choice == "1":
+    # Automatically use option 3 (Append Newest Duration)
+    if not os.path.exists(DB_PATH):
+        print("[!] Database not found. Will download all time data.")
         return None, None
-    elif choice == "2":
-        start = input("Enter start date (e.g. '01 July 2025'): ")
-        end = input("Enter end date (e.g. '07 July 2025'): ")
-        return parse_date_or_datetime(start, True), parse_date_or_datetime(end, False)
-    elif choice == "3":
-        if not os.path.exists(DB_PATH):
-            print("[!] Database not found.")
-            return None, None
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT `Played Time` FROM scrobbles ORDER BY `Played Time` DESC LIMIT 1")
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            start_ts = int(datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()) + 1
-            return start_ts, int(datetime.now().timestamp())
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT `Played Time` FROM scrobbles ORDER BY `Played Time` DESC LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        start_ts = int(datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()) + 1
+        print(f"\n[📅] Fetching new scrobbles since: {datetime.fromtimestamp(start_ts).strftime('%d %B %Y %H:%M:%S')}")
+        return start_ts, int(datetime.now().timestamp())
+    
+    print("[!] No existing data found. Will download all time data.")
     return None, None
 
 def fetch_all_scrobbles(user, time_from=None, time_to=None):
     all_tracks = []
     offset = 0
-    limit = 200
+    limit = 200  # Last.fm API limit per request
     base_url = "https://ws.audioscrobbler.com/2.0/"
+    total_tracks = None
+    
     while True:
-        params = {
-            "method": "user.getRecentTracks",
-            "user": user.get_name(),
-            "api_key": API_KEY,
-            "format": "json",
-            "limit": limit,
-            "offset": offset,
-        }
-        if time_from: params["from"] = time_from
-        if time_to: params["to"] = time_to
+        try:
+            params = {
+                "method": "user.getRecentTracks",
+                "user": user.get_name(),
+                "api_key": API_KEY,
+                "format": "json",
+                "limit": limit,
+                "offset": offset,
+            }
+            if time_from: params["from"] = time_from
+            if time_to: params["to"] = time_to
 
-        resp = requests.get(base_url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        tracks_data = data.get("recenttracks", {}).get("track", [])
-        if not tracks_data:
-            break
-        all_tracks.extend(tracks_data)
-        if len(tracks_data) < limit:
-            break
-        offset += limit
+            # Add delay to respect rate limits (5 requests per second)
+            if offset > 0:
+                import time
+                time.sleep(0.25)  # 250ms delay between requests
+
+            resp = requests.get(base_url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # Get total number of tracks if not already set
+            if total_tracks is None:
+                total_tracks = int(data["recenttracks"]["@attr"]["total"])
+                print(f"\n[📊] Total tracks to fetch: {total_tracks}")
+            
+            tracks_data = data.get("recenttracks", {}).get("track", [])
+            if not tracks_data:
+                break
+                
+            all_tracks.extend(tracks_data)
+            
+            # Show progress
+            progress = min(len(all_tracks), total_tracks)
+            print(f"\r[↓] Fetching tracks... {progress}/{total_tracks} ({(progress/total_tracks*100):.1f}%)", end="")
+            
+            if len(tracks_data) < limit:
+                break
+                
+            offset += limit
+            
+        except requests.exceptions.RequestException as e:
+            print(f"\n[!] Error fetching tracks (offset={offset}): {str(e)}")
+            print("[↻] Retrying in 5 seconds...")
+            time.sleep(5)
+            continue
+            
+    print("\n[✓] Finished fetching tracks")
     return all_tracks
 
 def process_scrobbles(raw_scrobbles, loved_tracks):
