@@ -1,7 +1,8 @@
 import os
 import csv
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 from dotenv import load_dotenv
 import pylast
 import requests
@@ -13,6 +14,12 @@ API_KEY = os.getenv("LASTFM_API_KEY")
 API_SECRET = os.getenv("LASTFM_API_SECRET")
 USERNAME = os.getenv("LASTFM_USERNAME")
 PASSWORD_HASH = os.getenv("LASTFM_PASSWORD")
+
+if not all([API_KEY, API_SECRET, USERNAME]):
+    print("[!] Missing Last.fm API credentials in .env file")
+    print("Required variables: LASTFM_API_KEY, LASTFM_API_SECRET, LASTFM_USERNAME")
+    input("Press Enter to exit...")
+    exit(1)
 
 network = pylast.LastFMNetwork(
     api_key=API_KEY,
@@ -50,11 +57,13 @@ def parse_date_or_datetime(dt_str, is_start=True):
         dt = dt.replace(hour=0, minute=1, second=0) if is_start else dt.replace(hour=23, minute=59, second=59)
     return int(dt.timestamp())
 
-def get_time_range_from_user():
-    # Automatically select option 3 (Append Newest Duration) without prompting
+def get_next_day_range():
+    """Get the next day's time range that needs to be fetched."""
     if not os.path.exists(DB_PATH):
-        print("\n[!] Database not found. Will download all time data.")
-        return None, None
+        print("\n[!] Database not found. Will start from today and work backwards.")
+        end_date = datetime.now().replace(hour=23, minute=59, second=59)
+        start_date = end_date.replace(hour=0, minute=0, second=0)
+        return int(start_date.timestamp()), int(end_date.timestamp()), None
     
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -64,19 +73,32 @@ def get_time_range_from_user():
         conn.close()
         
         if row and row[0]:
-            start_ts = int(datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()) + 1
-            current_ts = int(datetime.now().timestamp())
-            print(f"\n[🔄] Automatically fetching new scrobbles since last update")
-            print(f"[📅] From: {datetime.fromtimestamp(start_ts).strftime('%d %B %Y %H:%M:%S')}")
-            return start_ts, current_ts
+            # Get the date of the last update
+            last_update = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            # Start from the next day at 00:00:00
+            start_date = (last_update + timedelta(days=1)).replace(hour=0, minute=0, second=0)
             
-        print("\n[!] No existing data found. Will download all time data.")
-        return None, None
+            # If start date is in the future, we're done
+            if start_date > datetime.now():
+                return None, None, last_update
+            
+            # End at 23:59:59 of the same day
+            end_date = start_date.replace(hour=23, minute=59, second=59)
+            
+            # If end date is in the future, adjust to now
+            if end_date > datetime.now():
+                end_date = datetime.now()
+            
+            return int(start_date.timestamp()), int(end_date.timestamp()), last_update
+            
+        print("\n[!] No existing data found. Will start from today and work backwards.")
+        end_date = datetime.now().replace(hour=23, minute=59, second=59)
+        start_date = end_date.replace(hour=0, minute=0, second=0)
+        return int(start_date.timestamp()), int(end_date.timestamp()), None
         
     except Exception as e:
         print(f"\n[!] Error reading database: {str(e)}")
-        print("[!] Will download all time data.")
-        return None, None
+        return None, None, None
 
 def fetch_all_scrobbles(user, time_from=None, time_to=None):
     all_tracks = []
@@ -84,6 +106,10 @@ def fetch_all_scrobbles(user, time_from=None, time_to=None):
     limit = 200  # Last.fm API limit per request
     base_url = "https://ws.audioscrobbler.com/2.0/"
     total_tracks = None
+    
+    # Rate limiting settings
+    requests_per_minute = 180  # Last.fm limit is 200/minute, staying just under it
+    delay_between_requests = 60 / requests_per_minute  # ~0.33 seconds between requests
     
     while True:
         try:
@@ -98,10 +124,9 @@ def fetch_all_scrobbles(user, time_from=None, time_to=None):
             if time_from: params["from"] = time_from
             if time_to: params["to"] = time_to
 
-            # Add delay to respect rate limits (5 requests per second)
+            # Add delay to respect rate limits
             if offset > 0:
-                import time
-                time.sleep(0.25)  # 250ms delay between requests
+                time.sleep(delay_between_requests)
 
             resp = requests.get(base_url, params=params)
             resp.raise_for_status()
@@ -129,6 +154,10 @@ def fetch_all_scrobbles(user, time_from=None, time_to=None):
             
         except requests.exceptions.RequestException as e:
             print(f"\n[!] Error fetching tracks (offset={offset}): {str(e)}")
+            # If we've already fetched all expected tracks, break out of the loop
+            if total_tracks is not None and len(all_tracks) >= total_tracks:
+                print("[✓] All expected tracks fetched. Moving on.")
+                break
             print("[↻] Retrying in 5 seconds...")
             time.sleep(5)
             continue
@@ -136,19 +165,26 @@ def fetch_all_scrobbles(user, time_from=None, time_to=None):
     print("\n[✓] Finished fetching tracks")
     return all_tracks
 
-def process_scrobbles(raw_scrobbles, loved_tracks):
+def process_scrobbles(raw_scrobbles, loved_tracks=None):
+    print("\n[🔄] Processing scrobbles...")
     combined = {}
-    for track in raw_scrobbles:
+    total = len(raw_scrobbles)
+    for i, track in enumerate(raw_scrobbles, 1):
         if not isinstance(track, dict) or "date" not in track or "#text" not in track["date"]:
             continue
         artist = track["artist"]["#text"]
         title = track["name"]
         timestamp = int(track["date"]["uts"])
         played_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        loved = 1 if any(
-            lt.track.artist.name == artist and lt.track.title == title
-            for lt in loved_tracks
-        ) else 0
+        if i % 100 == 0:
+            print(f"\r[🔄] Processing tracks... {i}/{total} ({(i/total*100):.1f}%)", end="")
+        if loved_tracks is not None:
+            loved = 1 if any(
+                lt.track.artist.name == artist and lt.track.title == title
+                for lt in loved_tracks
+            ) else 0
+        else:
+            loved = 0
         key = (artist, title)
         if key not in combined:
             combined[key] = {
@@ -165,35 +201,68 @@ def process_scrobbles(raw_scrobbles, loved_tracks):
     return list(combined.values())
 
 def save_csv(scrobbles, csv_filename):
+    print(f"\n[💾] Saving {len(scrobbles)} tracks to CSV file...")
     with open(csv_filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Played Time", "Artist", "Track Title", "Loved", "Playcount"])
         writer.writeheader()
         writer.writerows(scrobbles)
+    print(f"[✓] CSV file saved: {csv_filename}")
 
 def main():
     show_latest_db_played_time()
-    time_from, time_to = get_time_range_from_user()
-
-    if time_from and time_to:
-        start_str = datetime.fromtimestamp(time_from).strftime("%d %B %Y")
-        end_str = datetime.fromtimestamp(time_to).strftime("%d %B %Y")
-        csv_filename = f"scrobbles ({start_str} to {end_str}).csv"
-    else:
-        csv_filename = "scrobbles_all_time.csv"
-
     user = network.get_user(USERNAME)
-    loved_tracks = user.get_loved_tracks()
-    raw_scrobbles = fetch_all_scrobbles(user, time_from, time_to)
-    final_scrobbles = process_scrobbles(raw_scrobbles, loved_tracks)
+    
+    # Try to get loved tracks once at the start
+    try:
+        print("[❤️] Fetching loved tracks...")
+        loved_tracks = user.get_loved_tracks()
+        print("[✓] Loved tracks fetched successfully")
+    except Exception as e:
+        print("[!] Could not fetch loved tracks. Will continue without loved status.")
+        print(f"[!] Error: {str(e)}")
+        loved_tracks = None
 
-    if not final_scrobbles:
-        print("[✗] No scrobbles found.")
-        return
-
-    save_csv(final_scrobbles, csv_filename)
-    print(f"[✓] Saved {len(final_scrobbles)} scrobbles to {csv_filename}")
-
-    subprocess.run(["python", os.path.join(BASE_DIR, "2_CSV_to_DataBase.py"), csv_filename])
+    while True:
+        # Get the next day's range to process
+        start_ts, end_ts, last_update = get_next_day_range()
+        
+        # If no more days to process, we're done
+        if start_ts is None or end_ts is None:
+            if last_update:
+                print(f"\n[✨] Database is up to date! Last update: {last_update.strftime('%d %B %Y %H:%M:%S')}")
+            else:
+                print("\n[!] Could not determine time range to update.")
+            return
+        
+        # Show what day we're processing
+        day_str = datetime.fromtimestamp(start_ts).strftime("%d %B %Y")
+        print(f"\n[📅] Processing scrobbles for: {day_str}")
+        
+        raw_scrobbles = fetch_all_scrobbles(user, start_ts, end_ts)
+        if raw_scrobbles:
+            final_scrobbles = process_scrobbles(raw_scrobbles, loved_tracks)
+            
+            if final_scrobbles:
+                csv_filename = f"scrobbles ({day_str}).csv"
+                save_csv(final_scrobbles, csv_filename)
+                
+                print("\n[📥] Updating database...")
+                subprocess.run(["python", os.path.join(BASE_DIR, "2_CSV_to_DataBase.py"), csv_filename])
+                print(f"[✓] Added {len(final_scrobbles)} tracks for {day_str}")
+            else:
+                print(f"[ℹ️] No valid scrobbles found for {day_str}")
+        else:
+            print(f"[ℹ️] No scrobbles found for {day_str}")
+        
+        # Small delay between days to avoid API issues
+        DELAY_BETWEEN_DAYS = 3  # 3 seconds between days
+        print(f"\n[⏳] Brief pause before next day", end="")
+        for i in range(DELAY_BETWEEN_DAYS):
+            time.sleep(1)
+            print(".", end="", flush=True)
+        print()
+    
+    print("\n[✨] Update process completed!")
 
 if __name__ == "__main__":
     main()

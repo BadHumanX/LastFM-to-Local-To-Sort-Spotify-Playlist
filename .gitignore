@@ -45,3 +45,4 @@ Thumbs.db
 # Project specific
 DataBases/*
 !DataBases/.gitkeep
+*.xls
