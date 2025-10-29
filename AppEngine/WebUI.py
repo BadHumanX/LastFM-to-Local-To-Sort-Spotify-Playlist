@@ -36,7 +36,7 @@ DB_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "DataBases", "All_Scrobbl
 
 
 def fetch_all_user_playlists(sp, user_id):
-    """Fetch all playlists owned by the user with pagination and folder structure."""
+    """Fetch all playlists owned by the user with pagination."""
     all_playlists = []
     offset = 0
 
@@ -47,27 +47,10 @@ def fetch_all_user_playlists(sp, user_id):
             break
 
         # Filter playlists to only those owned by the current user
-        for playlist in items:
-            if playlist.get("owner", {}).get("id") == user_id:
-                # Extract folder information from description if available
-                description = playlist.get("description", "")
-                folder = None
-                
-                # Spotify stores folder info in playlist description with format "Folder: folder_name/subfolder"
-                if description and "Folder:" in description:
-                    try:
-                        folder = description.split("Folder:")[1].strip()
-                    except:
-                        folder = None
-                
-                # Add folder information to playlist object
-                playlist["folder"] = folder
-                all_playlists.append(playlist)
-                
+        user_playlists = [p for p in items if p.get("owner", {}).get("id") == user_id]
+        all_playlists.extend(user_playlists)
         offset += 50
 
-    # Sort playlists by folder structure
-    all_playlists.sort(key=lambda x: (x.get("folder", "") or "", x["name"].lower()))
     return all_playlists
 
 
