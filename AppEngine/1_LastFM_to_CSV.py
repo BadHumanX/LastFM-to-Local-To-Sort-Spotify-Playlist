@@ -57,15 +57,16 @@ def parse_date_or_datetime(dt_str, is_start=True):
         dt = dt.replace(hour=0, minute=1, second=0) if is_start else dt.replace(hour=23, minute=59, second=59)
     return int(dt.timestamp())
 
-def get_next_day_range():
-    """Get the next day's time range that needs to be fetched."""
+def get_next_time_range():
+    """Get the next 24-hour range that needs to be fetched."""
     if not os.path.exists(DB_PATH):
-        print("\n[!] Database not found. Will start from today and work backwards.")
-        end_date = datetime.now().replace(hour=23, minute=59, second=59)
-        start_date = end_date.replace(hour=0, minute=0, second=0)
+        print("\n[!] Database not found. Will start from last 24 hours.")
+        end_date = datetime.now()
+        start_date = end_date - timedelta(hours=24)
         return int(start_date.timestamp()), int(end_date.timestamp()), None
     
     try:
+        current_time = datetime.now()
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT `Played Time` FROM scrobbles ORDER BY `Played Time` DESC LIMIT 1")
@@ -73,21 +74,25 @@ def get_next_day_range():
         conn.close()
         
         if row and row[0]:
-            # Get the date of the last update
+            # Get the timestamp of the last update
             last_update = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-            # Start from the next day at 00:00:00
-            start_date = (last_update + timedelta(days=1)).replace(hour=0, minute=0, second=0)
             
-            # If start date is in the future, we're done
-            if start_date > datetime.now():
+            # If last update is less than 5 minutes old, we're done
+            time_diff = (current_time - last_update).total_seconds()
+            if time_diff < 300:  # 5 minutes
+                print(f"\n[✨] Database is up to date! Last update was {int(time_diff)} seconds ago.")
                 return None, None, last_update
             
-            # End at 23:59:59 of the same day
-            end_date = start_date.replace(hour=23, minute=59, second=59)
+            # Start from the last update timestamp
+            start_date = last_update
             
-            # If end date is in the future, adjust to now
-            if end_date > datetime.now():
-                end_date = datetime.now()
+            # Calculate end date (24 hours after start or current time if sooner)
+            end_date = min(start_date + timedelta(hours=24), current_time)
+            
+            # If we've caught up to current time, we're done
+            if end_date >= current_time:
+                print(f"\n[✨] Database is up to date! Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S')}")
+                return None, None, last_update
             
             return int(start_date.timestamp()), int(end_date.timestamp()), last_update
             
@@ -169,36 +174,71 @@ def process_scrobbles(raw_scrobbles, loved_tracks=None):
     print("\n[🔄] Processing scrobbles...")
     combined = {}
     total = len(raw_scrobbles)
-    for i, track in enumerate(raw_scrobbles, 1):
-        if not isinstance(track, dict) or "date" not in track or "#text" not in track["date"]:
-            continue
-        artist = track["artist"]["#text"]
-        title = track["name"]
-        timestamp = int(track["date"]["uts"])
-        played_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        if i % 100 == 0:
-            print(f"\r[🔄] Processing tracks... {i}/{total} ({(i/total*100):.1f}%)", end="")
-        if loved_tracks is not None:
-            loved = 1 if any(
-                lt.track.artist.name == artist and lt.track.title == title
-                for lt in loved_tracks
-            ) else 0
-        else:
-            loved = 0
-        key = (artist, title)
-        if key not in combined:
-            combined[key] = {
-                "Played Time": played_time,
-                "Artist": artist,
-                "Track Title": title,
-                "Loved": loved,
-                "Playcount": 1
-            }
-        else:
-            combined[key]["Playcount"] += 1
-            combined[key]["Played Time"] = max(combined[key]["Played Time"], played_time)
-            combined[key]["Loved"] = max(combined[key]["Loved"], loved)
-    return list(combined.values())
+    try:
+        for i, track in enumerate(raw_scrobbles, 1):
+            try:
+                if not isinstance(track, dict):
+                    print(f"\n[!] Invalid track format at index {i}")
+                    continue
+                if "date" not in track or "#text" not in track["date"]:
+                    print(f"\n[!] Missing date information at index {i}")
+                    continue
+                if "artist" not in track or "#text" not in track["artist"]:
+                    print(f"\n[!] Missing artist information at index {i}")
+                    continue
+                if "name" not in track:
+                    print(f"\n[!] Missing track name at index {i}")
+                    continue
+
+                artist = track["artist"]["#text"]
+                title = track["name"]
+                timestamp = int(track["date"]["uts"])
+                played_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+                # Show progress more frequently
+                if i % 50 == 0 or i == total:
+                    print(f"\r[🔄] Processing tracks... {i}/{total} ({(i/total*100):.1f}%)", end="", flush=True)
+
+                # Process loved status
+                if loved_tracks is not None:
+                    try:
+                        loved = 1 if any(
+                            lt.track.artist.name == artist and lt.track.title == title
+                            for lt in loved_tracks
+                        ) else 0
+                    except Exception as e:
+                        print(f"\n[!] Error checking loved status: {str(e)}")
+                        loved = 0
+                else:
+                    loved = 0
+
+                key = (artist, title)
+                if key not in combined:
+                    combined[key] = {
+                        "Played Time": played_time,
+                        "Artist": artist,
+                        "Track Title": title,
+                        "Loved": loved,
+                        "Playcount": 1
+                    }
+                else:
+                    combined[key]["Playcount"] += 1
+                    combined[key]["Played Time"] = max(combined[key]["Played Time"], played_time)
+                    combined[key]["Loved"] = max(combined[key]["Loved"], loved)
+
+            except Exception as e:
+                print(f"\n[!] Error processing track at index {i}: {str(e)}")
+                continue
+
+        print("\n[✓] Processing completed successfully")
+        return list(combined.values())
+
+    except Exception as e:
+        print(f"\n[!] Critical error during processing: {str(e)}")
+        if combined:
+            print("[ℹ️] Returning partial results")
+            return list(combined.values())
+        raise
 
 def save_csv(scrobbles, csv_filename):
     print(f"\n[💾] Saving {len(scrobbles)} tracks to CSV file...")
@@ -223,10 +263,10 @@ def main():
         loved_tracks = None
 
     while True:
-        # Get the next day's range to process
-        start_ts, end_ts, last_update = get_next_day_range()
+        # Get the next 24-hour range to process
+        start_ts, end_ts, last_update = get_next_time_range()
         
-        # If no more days to process, we're done
+        # If no more time ranges to process, we're done
         if start_ts is None or end_ts is None:
             if last_update:
                 print(f"\n[✨] Database is up to date! Last update: {last_update.strftime('%d %B %Y %H:%M:%S')}")
